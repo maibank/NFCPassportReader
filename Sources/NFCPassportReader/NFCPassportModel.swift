@@ -249,6 +249,18 @@ public class NFCPassportModel {
         return ret
     }
 
+    public func getDocumentSigningCertificatePem() throws -> String {
+        guard let sod = getDataGroup(.SOD) else {
+            throw PassiveAuthenticationError.SODMissing("No SOD found" )
+        }
+
+        let data = Data(sod.body)
+        let cert = try OpenSSLUtils.getX509CertificatesFromPKCS7( pkcs7Der: data ).first!
+        self.certificateSigningGroups[.documentSigningCertificate] = cert
+
+        return cert.certToPEM()
+    }
+
     public func getHashesForDatagroups( hashAlgorythm: String ) -> [DataGroupId:[UInt8]]  {
         var ret = [DataGroupId:[UInt8]]()
         
