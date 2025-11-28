@@ -261,6 +261,31 @@ public class NFCPassportModel {
         return cert.certToPEM()
     }
 
+    public func getDocumentSigningCertificateData() -> Data? {
+        guard let pem = try? getDocumentSigningCertificatePem() else {
+            return nil
+        }
+
+        let lines = pem
+            .components(separatedBy: .newlines)
+            .filter { !$0.hasPrefix("-----") && !$0.isEmpty }
+        let base64String = lines.joined()
+
+        return Data(base64Encoded: base64String)
+    }
+
+    public func getGroupsData(groupIds: [DataGroupId]) -> [String: Data] {
+        var res = [String: Data]()
+        groupIds.forEach { id in
+            if let dataGroup = self.dataGroupsRead[id] {
+                let value = Data(dataGroup.data)
+                res[id.getName()] = value
+            }
+        }
+
+        return res
+    }
+
     public func getHashesForDatagroups( hashAlgorythm: String ) -> [DataGroupId:[UInt8]]  {
         var ret = [DataGroupId:[UInt8]]()
         
