@@ -72,6 +72,40 @@ class ChipAuthenticationHandler {
         }
     }
     
+    /// Performs the key agreement part of Chip Authentication using an ephemeral public key that was generated
+    /// elsewhere (e.g. by a backend) rather than generating our own.
+    /// As we don't have the matching private key, we can't derive the new Secure Messaging keys, so after this
+    /// only APDUs that have been protected by the owner of the ephemeral key can be sent to the passport
+    /// - Parameter ephemeralKeys: the available ephemeral keys - the one matching the domain parameters of the passports public key is used
+    /// - Returns: details of the Chip Authentication that was run
+    public func doChipAuthentication( using ephemeralKeys : [ChipAuthenticationEphemeralKey] ) async throws -> ChipAuthenticationResult {
+
+        Logger.chipAuth.info( "Performing Chip Authentication with external ephemeral key - number of public keys found - \(self.chipAuthPublicKeyInfos.count)" )
+        guard isChipAuthenticationSupported else {
+            throw NFCPassportReaderError.NotYetSupported( "ChipAuthentication not supported" )
+        }
+
+        for chipAuthPublicKeyInfo in chipAuthPublicKeyInfos {
+            let keyId = chipAuthPublicKeyInfo.keyId
+            guard let oid = chipAuthInfos[keyId ?? 0]?.oid ?? inferOID( fromPublicKeyOID:chipAuthPublicKeyInfo.oid),
+                  let parameterId = OpenSSLUtils.getStandardisedDomainParameterId(from: chipAuthPublicKeyInfo.pubKey),
+                  let ephemeralKey = ephemeralKeys.first(where: { $0.parameterId == parameterId }) else {
+                // try next key
+                continue
+            }
+
+            try await sendPublicKey(oid: oid, keyId: keyId, keyData: ephemeralKey.publicKey)
+            Logger.chipAuth.debug( "Public Key successfully sent to passport!" )
+
+            // The passport has now switched to the new session keys (which we can't derive)
+            tagReader?.secureMessaging = nil
+
+            return ChipAuthenticationResult(keyRef: ephemeralKey.keyRef, protocolOid: oid, keyId: keyId)
+        }
+
+        throw NFCPassportReaderError.InvalidDataPassed( "No ephemeral key matches the domain parameters of the passports Chip Authentication public key" )
+    }
+
     private func doChipAuthentication( with chipAuthPublicKeyInfo : ChipAuthenticationPublicKeyInfo ) async throws -> Bool {
         
         // So it turns out that some passports don't have ChipAuthInfo items.
@@ -119,7 +153,10 @@ class ChipAuthenticationHandler {
         EVP_PKEY_CTX_free(pctx)
         
         // Send the public key to the passport
-        try await sendPublicKey(oid: oid, keyId: keyId, pcdPublicKey: ephemeralKeyPair!)
+        guard let keyData = OpenSSLUtils.getPublicKeyData(from: ephemeralKeyPair!) else {
+            throw NFCPassportReaderError.InvalidDataPassed("Unable to get public key data from public key" )
+        }
+        try await sendPublicKey(oid: oid, keyId: keyId, keyData: keyData)
             
         Logger.chipAuth.debug( "Public Key successfully sent to passport!" )
         
@@ -131,12 +168,9 @@ class ChipAuthenticationHandler {
         try restartSecureMessaging( oid : oid, sharedSecret : sharedSecret, maxTranceiveLength : 1, shouldCheckMAC : true)
     }
     
-    private func sendPublicKey(oid : String, keyId : Int?, pcdPublicKey : OpaquePointer) async throws {
+    private func sendPublicKey(oid : String, keyId : Int?, keyData : [UInt8]) async throws {
         let cipherAlg = try ChipAuthenticationInfo.toCipherAlgorithm(oid: oid)
-        guard let keyData = OpenSSLUtils.getPublicKeyData(from: pcdPublicKey) else {
-            throw NFCPassportReaderError.InvalidDataPassed("Unable to get public key data from public key" )
-        }
-        
+
         if cipherAlg.hasPrefix("DESede") {
         
             var idData : [UInt8] = []

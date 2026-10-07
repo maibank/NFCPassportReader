@@ -615,6 +615,70 @@ public class OpenSSLUtils {
         return data
     }
     
+    /// Returns the ICAO 9303-11 standardised domain parameter id for the parameters of a DH or EC key
+    /// Also handles EC keys that have explicit parameters rather than a named curve (common in DG14)
+    /// - Parameter key: the key to get the domain parameter id for
+    /// - Returns: the domain parameter id or nil if the key doesn't use standardised domain parameters
+    @available(iOS 13, macOS 10.15, *)
+    public static func getStandardisedDomainParameterId(from key:OpaquePointer) -> Int? {
+        let v = EVP_PKEY_get_base_id( key )
+        if v == EVP_PKEY_DH || v == EVP_PKEY_DHX {
+            guard let dh = EVP_PKEY_get0_DH(key) else {
+                return nil
+            }
+            var p : OpaquePointer?
+            var g : OpaquePointer?
+            DH_get0_pqg(dh, &p, nil, &g)
+            guard p != nil, g != nil else {
+                return nil
+            }
+
+            let stdParams : [(Int, OpaquePointer?)] = [
+                (PACEInfo.PARAM_ID_GFP_1024_160, DH_get_1024_160()),
+                (PACEInfo.PARAM_ID_GFP_2048_224, DH_get_2048_224()),
+                (PACEInfo.PARAM_ID_GFP_2048_256, DH_get_2048_256())
+            ]
+            defer { stdParams.forEach { DH_free($0.1) } }
+
+            for (paramId, stdDH) in stdParams {
+                var stdP : OpaquePointer?
+                var stdG : OpaquePointer?
+                DH_get0_pqg(stdDH, &stdP, nil, &stdG)
+                if stdP != nil, stdG != nil, BN_cmp(p, stdP) == 0, BN_cmp(g, stdG) == 0 {
+                    return paramId
+                }
+            }
+        } else if v == EVP_PKEY_EC {
+            guard let ec = EVP_PKEY_get0_EC_KEY(key),
+                let ec_group = EC_KEY_get0_group(ec) else {
+                return nil
+            }
+
+            var nid = EC_GROUP_get_curve_name(ec_group)
+            if nid == NID_undef {
+                // Explicit parameters - see if they match one of the named curves
+                nid = EC_GROUP_check_named_curve(ec_group, 0, nil)
+            }
+
+            let stdParams : [Int32 : Int] = [
+                NID_X9_62_prime192v1 : PACEInfo.PARAM_ID_ECP_NIST_P192_R1,
+                NID_brainpoolP192r1 : PACEInfo.PARAM_ID_ECP_BRAINPOOL_P192_R1,
+                NID_secp224r1 : PACEInfo.PARAM_ID_ECP_NIST_P224_R1,
+                NID_brainpoolP224r1 : PACEInfo.PARAM_ID_ECP_BRAINPOOL_P224_R1,
+                NID_X9_62_prime256v1 : PACEInfo.PARAM_ID_ECP_NIST_P256_R1,
+                NID_brainpoolP256r1 : PACEInfo.PARAM_ID_ECP_BRAINPOOL_P256_R1,
+                NID_brainpoolP320r1 : PACEInfo.PARAM_ID_ECP_BRAINPOOL_P320_R1,
+                NID_secp384r1 : PACEInfo.PARAM_ID_ECP_NIST_P384_R1,
+                NID_brainpoolP384r1 : PACEInfo.PARAM_ID_ECP_BRAINPOOL_P384_R1,
+                NID_brainpoolP512r1 : PACEInfo.PARAM_ID_ECP_BRAINPOOL_P512_R1,
+                NID_secp521r1 : PACEInfo.PARAM_ID_ECP_NIST_P521_R1
+            ]
+            return stdParams[nid]
+        }
+
+        return nil
+    }
+
     // Caller is responsible for freeing the key
     @available(iOS 13, macOS 10.15, *)
     public static func decodePublicKeyFromBytes(pubKeyData: [UInt8], params: OpaquePointer) -> OpaquePointer? {
