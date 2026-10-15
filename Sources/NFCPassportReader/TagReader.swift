@@ -254,6 +254,22 @@ public class TagReader {
         return try await send( cmd: cmd )
     }
 
+    /// Sends an APDU that has already been protected elsewhere (e.g. by a backend that holds the session keys)
+    /// The APDU is sent as is, and the response is returned as is (still protected), including the status bytes
+    /// - Parameter apdu: the complete command APDU
+    /// - Returns: the response data followed by SW1 and SW2
+    func sendProtected( apdu: [UInt8] ) async throws -> [UInt8] {
+        guard let cmd = NFCISO7816APDU(data:Data(apdu)) else {
+            throw NFCPassportReaderError.InvalidDataPassed("Invalid APDU")
+        }
+        Logger.tagReader.debug( "TagReader - sending already protected \(cmd)" )
+
+        let (data, sw1, sw2) = try await tag.sendCommand(apdu: cmd)
+        Logger.tagReader.debug( "\(String(format:"TagReader - Received response, size \(data.count)b, sw1:0x%02x sw2:0x%02x", sw1, sw2))" )
+
+        return [UInt8](data) + [sw1, sw2]
+    }
+
     func send( cmd: NFCISO7816APDU, useExtendedMode : Bool = false ) async throws -> ResponseAPDU {
         Logger.tagReader.debug( "TagReader - sending \(cmd)" )
         var toSend = cmd

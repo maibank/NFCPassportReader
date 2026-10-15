@@ -54,6 +54,8 @@ public class PassportReader : NSObject {
     private var skipCA = false
     private var skipPACE = false
     private var externalChallenge: [UInt8]?
+    private var chipAuthenticationKeys: [ChipAuthenticationEphemeralKey] = []
+    private var chipAuthenticationProofProvider: ((ChipAuthenticationResult, NFCPassportModel) async throws -> [UInt8])?
 
     // Extended mode is used for reading eMRTD's that support extended length APDUs
     private var useExtendedMode = false
@@ -99,6 +101,8 @@ public class PassportReader : NSObject {
         skipPACE: Bool = false,
         useExtendedMode: Bool = false,
         challenge: [UInt8]? = nil,
+        chipAuthenticationKeys: [ChipAuthenticationEphemeralKey] = [],
+        chipAuthenticationProofProvider: ((ChipAuthenticationResult, NFCPassportModel) async throws -> [UInt8])? = nil,
         customDisplayMessage: ((NFCViewDisplayMessage) -> String?)? = nil
     ) async throws -> NFCPassportModel {
 
@@ -108,6 +112,8 @@ public class PassportReader : NSObject {
         self.skipPACE = skipPACE
         self.useExtendedMode = useExtendedMode
         self.externalChallenge = challenge
+        self.chipAuthenticationKeys = chipAuthenticationKeys
+        self.chipAuthenticationProofProvider = chipAuthenticationProofProvider
 
         self.dataGroupsToRead.removeAll()
         self.dataGroupsToRead.append( contentsOf:tags)
@@ -313,7 +319,8 @@ extension PassportReader {
         // Now to read the datagroups
         try await readDataGroups(tagReader: tagReader)
 
-        try await doActiveAuthenticationIfNeccessary(tagReader : tagReader)
+        try await doActiveAuthenticationIfNeccessary(tagReader: tagReader)
+        try await doExternalChipAuthenticationIfNeccessary(tagReader: tagReader)
 
         self.updateReaderSessionMessage(alertMessage: NFCViewDisplayMessage.successfulRead)
         self.shouldNotReportNextReaderSessionInvalidationErrorUserCanceled = true
@@ -341,6 +348,35 @@ extension PassportReader {
     }
     
 
+    /// Chip Authentication using an ephemeral key generated elsewhere (e.g. by a backend) - only done if
+    /// Active Authentication isn't supported. It has to be the last thing we do as once the key has been sent
+    /// to the passport we can't read anything else (we can't derive the new session keys)
+    func doExternalChipAuthenticationIfNeccessary(tagReader: TagReader) async throws {
+        guard !self.chipAuthenticationKeys.isEmpty,
+              !self.passport.activeAuthenticationSupported,
+              let dg14 = self.passport.getDataGroup(.DG14) as? DataGroup14 else {
+            return
+        }
+        let caHandler = ChipAuthenticationHandler(dg14: dg14, tagReader: tagReader)
+        guard caHandler.isChipAuthenticationSupported else {
+            return
+        }
+        self.currentlyReadingDataGroup = nil
+        self.updateReaderSessionMessage(alertMessage: NFCViewDisplayMessage.activeAuthentication)
+
+        Logger.passportReader.info("Performing Chip Authentication with external ephemeral key")
+
+        let result = try await caHandler.doChipAuthentication(using: self.chipAuthenticationKeys)
+        self.passport.chipAuthenticationResult = result
+
+        // Get an APDU protected with the new session keys, and send it to prove the passport derived the same keys
+        if let proofProvider = self.chipAuthenticationProofProvider {
+            let proofApdu = try await proofProvider(result, self.passport)
+            self.passport.chipAuthenticationProofResponse = try await tagReader.sendProtected(apdu: proofApdu)
+        }
+    }
+
+
     func doBACAuthentication(tagReader : TagReader) async throws {
         self.currentlyReadingDataGroup = nil
 
@@ -355,28 +391,28 @@ extension PassportReader {
         self.passport.BACStatus = .success
     }
 
-    func readDataGroups( tagReader: TagReader ) async throws {
-        
+    func readDataGroups(tagReader: TagReader) async throws {
         // Read COM
         var DGsToRead = [DataGroupId]()
 
-        self.updateReaderSessionMessage( alertMessage: NFCViewDisplayMessage.readingDataGroupProgress(.COM, 0) )
+        self.updateReaderSessionMessage(alertMessage: NFCViewDisplayMessage.readingDataGroupProgress(.COM, 0))
         
-        if let com = try await readDataGroup(tagReader:tagReader, dgId:.COM) as? COM {
-            self.passport.addDataGroup( .COM, dataGroup:com )
+        if let com = try await readDataGroup(tagReader: tagReader, dgId: .COM) as? COM {
+            self.passport.addDataGroup(.COM, dataGroup: com)
             self.addDatagroupsToRead(com: com, to: &DGsToRead)
         }
         
-        if DGsToRead.contains( .DG14 ) {
+        if DGsToRead.contains(.DG14) {
             DGsToRead.removeAll { $0 == .DG14 }
             
             if !skipCA {
                 // Do Chip Authentication
-                if let dg14 = try await readDataGroup(tagReader:tagReader, dgId:.DG14) as? DataGroup14 {
-                    self.passport.addDataGroup( .DG14, dataGroup:dg14 )
+                if let dg14 = try await readDataGroup(tagReader: tagReader, dgId: .DG14) as? DataGroup14 {
+                    self.passport.addDataGroup(.DG14, dataGroup: dg14 )
                     let caHandler = ChipAuthenticationHandler(dg14: dg14, tagReader: tagReader)
                      
-                    if caHandler.isChipAuthenticationSupported {
+                    // If we have external ephemeral keys, Chip Authentication is done after everything has been read
+                    if caHandler.isChipAuthenticationSupported && self.chipAuthenticationKeys.isEmpty {
                         do {
                             // Do Chip authentication and then continue reading datagroups
                             try await caHandler.doChipAuthentication()

@@ -119,6 +119,11 @@ public class NFCPassportModel {
     public internal(set) var PACEStatus : PassportAuthenticationStatus = .notDone
     public internal(set) var chipAuthenticationStatus : PassportAuthenticationStatus = .notDone
 
+    // Only set when Chip Authentication was run with an external ephemeral key. In that case chipAuthenticationStatus
+    // stays .notDone as only the owner of the key can verify the proof response
+    public internal(set) var chipAuthenticationResult : ChipAuthenticationResult?
+    public internal(set) var chipAuthenticationProofResponse : [UInt8] = []
+
     public private(set) var passportCorrectlySigned : Bool = false
     public private(set) var documentSigningCertificateVerified : Bool = false
     public private(set) var passportDataNotTampered : Bool = false
